@@ -13,6 +13,7 @@ A tiny playable pixel art wizard. Walk a moonlit rampart, hold to charge a bolt,
 | Walk | ← → or A D | left and right buttons |
 | Charge | hold Space | hold the gem button |
 | Cast | release Space | release the gem button |
+| Mute / unmute | M | |
 
 A quick tap fires a weak bolt. Holding for up to 1.4 seconds builds a bigger one, and a full charge punches through every target in its path. You can turn to aim while charging, but you can't walk.
 
@@ -22,6 +23,8 @@ Built with Claude from two prompts: the original animated-wizard prompt by Majid
 
 
 One HTML file, vanilla JavaScript and Canvas 2D, no libraries or assets.
+
+- Every sound is synthesized live with the Web Audio API (chiptune-style oscillators, noise and envelopes), so there are no audio files either. Sound starts on your first key press or tap.
 
 - Everything is drawn into a 128×96 buffer of palette indices (26 colors), then scaled up by the largest whole number that fits your screen.
 - The wizard is built procedurally from pose parameters each frame and mirrored for facing. The pose eases smoothly at 60 Hz but is sampled at 10 fps, so it moves like hand-drawn sprite frames.
