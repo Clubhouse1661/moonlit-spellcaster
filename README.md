@@ -18,6 +18,9 @@ A quick tap fires a weak bolt. Holding for up to 1.4 seconds builds a bigger one
 
 ## How it's made
 
+Built with Claude from two prompts: the original animated-wizard prompt by Majid Manzarpour, and a follow-up that turns it into a game. Both are in [PROMPT.md](PROMPT.md).
+
+
 One HTML file, vanilla JavaScript and Canvas 2D, no libraries or assets.
 
 - Everything is drawn into a 128×96 buffer of palette indices (26 colors), then scaled up by the largest whole number that fits your screen.
