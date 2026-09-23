@@ -1,0 +1,1287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Moonlit Spellcaster</title>
+<meta name="description" content="A tiny playable pixel art wizard: walk a moonlit rampart, hold to charge a bolt, knock down targets. Vanilla JS and Canvas 2D, one HTML file.">
+<meta name="theme-color" content="#07061a">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Moonlit Spellcaster">
+<meta property="og:description" content="A tiny playable pixel art wizard: walk a moonlit rampart, hold to charge a bolt, knock down targets. Vanilla JS and Canvas 2D, one HTML file.">
+<meta property="og:url" content="https://clubhouse1661.github.io/moonlit-spellcaster/">
+<meta property="og:image" content="https://clubhouse1661.github.io/moonlit-spellcaster/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Pixel art wizard casting a glowing bolt at an archery target under a full moon">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Moonlit Spellcaster">
+<meta name="twitter:description" content="A tiny playable pixel art wizard: walk a moonlit rampart, hold to charge a bolt, knock down targets. Vanilla JS and Canvas 2D, one HTML file.">
+<meta name="twitter:image" content="https://clubhouse1661.github.io/moonlit-spellcaster/og.png">
+<meta name="twitter:image:alt" content="Pixel art wizard casting a glowing bolt at an archery target under a full moon">
+<style>
+  :root { color-scheme: dark; --void: #07061a; }
+  html, body { height: 100%; margin: 0; background: var(--void); overflow: hidden; }
+  #stage {
+    position: fixed; inset: 0; width: 100%; height: 100%; display: block;
+    background: var(--void);
+    outline: none;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage" tabindex="0" role="img" aria-label="Playable pixel art wizard on a moonlit rampart. Arrow keys or A and D walk, hold Space to charge a bolt and release to cast at the targets."></canvas>
+<script>
+(function () {
+  'use strict';
+
+  // ------------------------------------------------------------------ constants
+  const W = 128, H = 96, NPIX = W * H;
+  const FLOOR = 80;            // first row of the stone floor
+  const LEVEL_W = 384;         // three screens wide
+  const DT = 1 / 60;           // fixed simulation step
+  const HOLD = 6;              // sim ticks per drawn pose -> 10 fps pixel cadence
+  const TAU = Math.PI * 2;
+  const WALK_STEP = 2;         // px per walk frame; equals planted-foot travel, so no sliding
+  const X_MIN = 19, X_MAX = LEVEL_W - 20;
+  const PILLAR_W = 10, PILLAR_TOP = FLOOR - 46;
+
+  // ------------------------------------------------------------------ palette (26)
+  const PAL_HEX = [
+    '#07061a', // 0  OUT     outline / void
+    '#0f0f2c', // 1  SKY1
+    '#17183f', // 2  SKY2
+    '#212453', // 3  SKY3
+    '#2d3268', // 4  SKY4    horizon
+    '#414883', // 5  GLOW    flash / faint aura
+    '#262033', // 6  ST_D    stone dark
+    '#3f3750', // 7  ST_M
+    '#5f5775', // 8  ST_L
+    '#ece6c8', // 9  MOON
+    '#b1a98c', // 10 MOON_S
+    '#fffdf0', // 11 WHITE
+    '#3b0f26', // 12 ROBE_X  deepest robe
+    '#6f1d34', // 13 ROBE_D
+    '#ab3a3b', // 14 ROBE_L
+    '#e5a53d', // 15 GOLD
+    '#f1c39a', // 16 SKIN
+    '#b57a60', // 17 SKIN_S
+    '#dfddea', // 18 BEARD
+    '#9593b4', // 19 BEARD_S
+    '#4b2c1d', // 20 WOOD_D
+    '#8b5a31', // 21 WOOD_L
+    '#86f7ff', // 22 CYAN
+    '#3d9cff', // 23 BLUE
+    '#9a5cff', // 24 VIOLET
+    '#ff6fd8'  // 25 PINK
+  ];
+  const OUT = 0, SKY1 = 1, SKY2 = 2, SKY3 = 3, GLOW = 5, ST_D = 6, ST_M = 7, ST_L = 8,
+        MOON = 9, MOON_S = 10, WHITE = 11, ROBE_X = 12, ROBE_D = 13, ROBE_L = 14,
+        GOLD = 15, SKIN = 16, SKIN_S = 17, BEARD = 18, BEARD_S = 19,
+        WOOD_D = 20, WOOD_L = 21, CYAN = 22, BLUE = 23, VIOLET = 24, PINK = 25;
+
+  const PAL32 = new Uint32Array(PAL_HEX.length);
+  const LITTLE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+  for (let i = 0; i < PAL_HEX.length; i++) {
+    const n = parseInt(PAL_HEX[i].slice(1), 16);
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    PAL32[i] = LITTLE ? ((255 << 24) | (b << 16) | (g << 8) | r) >>> 0
+                      : ((r << 24) | (g << 16) | (b << 8) | 255) >>> 0;
+  }
+
+  // particle colour ramps (6 steps each): bright -> material -> dark
+  const R_MAGIC = 0, R_PINK = 1, R_MOTE = 2, R_PAINT = 3, R_WISP = 4, R_WOOD = 5;
+  const RAMPS = new Uint8Array([
+    WHITE, CYAN, CYAN, BLUE, VIOLET, SKY3,
+    WHITE, PINK, PINK, VIOLET, VIOLET, SKY3,
+    WHITE, CYAN, BLUE, BLUE, VIOLET, GLOW,
+    WHITE, GOLD, ROBE_L, ROBE_D, ROBE_X, ST_D,
+    WHITE, MOON, MOON_S, BEARD_S, GLOW, SKY3,
+    WHITE, WOOD_L, WOOD_L, WOOD_D, WOOD_D, ST_D
+  ]);
+
+  // ------------------------------------------------------------------ buffers
+  const off = document.createElement('canvas');
+  off.width = W; off.height = H;
+  const octx = off.getContext('2d');
+  const img = octx.createImageData(W, H);
+  const out32 = new Uint32Array(img.data.buffer);
+  const fb = new Uint8Array(NPIX);            // palette-index frame buffer
+
+  // wizard sprite layer (index + 1, 0 = empty); origin = foot centre at (SOX, SOY)
+  const SW = 64, SH = 58, SOX = 32, SOY = 56;
+  const sb = new Uint8Array(SW * SH);
+
+  const view = document.getElementById('stage');
+  const vctx = view.getContext('2d', { alpha: false });
+  let scale = 1, offX = 0, offY = 0, cssToDev = 1;
+
+  // ------------------------------------------------------------------ seeded rng (init only)
+  let seed = 0x5eed;
+  function rnd() {
+    seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+
+  // ------------------------------------------------------------------ static scene data
+  const MX = 100, MY = 19, MR = 7;
+  const CRATERS = new Int8Array([-3, -1, -2, -1, 1, 2, 2, 2, 2, 3, -1, 3, 3, -3, -2, 4]);
+  const PAR_STAR = 0.06, PAR_MOON = 0.1, PAR_FAR = 0.2, PAR_NEAR = 0.45;
+
+  const NSTAR = 34;
+  const starX = new Uint8Array(NSTAR), starY = new Uint8Array(NSTAR);
+  const starPh = new Float32Array(NSTAR), starSp = new Float32Array(NSTAR);
+  for (let n = 0; n < NSTAR;) {
+    const x = 1 + Math.floor(rnd() * (W + 22)), y = 2 + Math.floor(rnd() * 52);
+    const dx = x - MX, dy = y - MY;
+    if (dx * dx + dy * dy < 20 * 20) continue;
+    starX[n] = x; starY[n] = y; starPh[n] = rnd() * TAU; starSp[n] = 0.6 + rnd() * 2.4;
+    n++;
+  }
+
+  const HILL_N = 256;
+  const farTop = new Uint8Array(HILL_N), nearTop = new Uint8Array(HILL_N);
+  for (let i = 0; i < HILL_N; i++) {
+    const x = i - 4;
+    farTop[i] = FLOOR - Math.round(12 + 4 * Math.sin(x * 0.045 + 0.3) + 2.5 * Math.sin(x * 0.11 + 1.7) + Math.sin(x * 0.31));
+    nearTop[i] = FLOOR - Math.round(4 + 2.5 * Math.sin(x * 0.06 + 0.8) + 1.5 * Math.sin(x * 0.15 + 2.1) + 0.8 * Math.sin(x * 0.37));
+  }
+
+  // ------------------------------------------------------------------ pixel font (3x5)
+  const GLYPH = new Uint16Array(128);
+  function glyph(ch, a, b, c, d, e) {
+    GLYPH[ch.charCodeAt(0)] = (parseInt(a, 2) << 12) | (parseInt(b, 2) << 9) | (parseInt(c, 2) << 6) | (parseInt(d, 2) << 3) | parseInt(e, 2);
+  }
+  glyph('A', '010', '101', '111', '101', '101'); glyph('C', '011', '100', '100', '100', '011');
+  glyph('D', '110', '101', '101', '101', '110'); glyph('E', '111', '100', '110', '100', '111');
+  glyph('H', '101', '101', '111', '101', '101'); glyph('I', '111', '010', '010', '010', '111');
+  glyph('K', '101', '101', '110', '101', '101'); glyph('L', '100', '100', '100', '100', '111');
+  glyph('O', '010', '101', '101', '101', '010'); glyph('P', '110', '101', '110', '100', '100');
+  glyph('S', '011', '100', '010', '001', '110'); glyph('T', '111', '010', '010', '010', '010');
+  glyph('W', '101', '101', '101', '111', '101');
+  glyph('<', '001', '011', '111', '011', '001'); glyph('>', '100', '110', '111', '110', '100');
+  glyph('0', '111', '101', '101', '101', '111'); glyph('1', '010', '110', '010', '010', '111');
+  glyph('2', '110', '001', '010', '100', '111'); glyph('3', '110', '001', '010', '001', '110');
+  glyph('4', '101', '101', '111', '001', '001'); glyph('5', '111', '100', '110', '001', '110');
+  glyph('6', '011', '100', '110', '101', '010'); glyph('7', '111', '001', '010', '010', '010');
+  glyph('8', '010', '101', '010', '101', '010'); glyph('9', '010', '101', '011', '001', '110');
+
+  // ------------------------------------------------------------------ pose / state
+  const HX = 0, HY = 1, ANG = 2, HDX = 3, HDY = 4, LEAN = 5, SWAY = 6, FLOP = 7, BRD = 8,
+        BOB = 9, FTN = 10, FTF = 11, LFN = 12, LFF = 13, TOE = 14, NPOSE = 15;
+  //                                  hX   hY    staff  hdX hdY lean sway  flop  beard bob footN footF liftN liftF toeF
+  const K_IDLE   = new Float32Array([ 7,  -12,  0.06,  0,  0,   0,   0,    0,    0,    0,  1,   -3,    0,    0,    0 ]);
+  const K_CHARGE = new Float32Array([ 8,  -22, -0.10,  0,  0,  -1,   0.9, -0.8,  1.6,  0,  1,   -3,    0,    0,    0 ]);
+  const K_CAST   = new Float32Array([ 11, -17,  0.95,  1,  0,   1,  -1.7, -1.6, -2.4,  0,  1,   -3,    0,    0,    0 ]);
+
+  // 8-frame walk: two steps of contact / down / passing / up, feet alternating.
+  // Planted feet move back WALK_STEP px per frame while the body moves forward the same amount.
+  const WALK = new Float32Array(8 * NPOSE);
+  (function buildWalk() {
+    const rN = [4, 2, 0, -2, -4, -2, 0, 2], rF = [-4, -2, 0, 2, 4, 2, 0, -2];
+    const lN = [0, 0, 0, 0, 0, 1, 1, 1], lF = [0, 1, 1, 1, 0, 0, 0, 0];
+    const hx = [8, 8, 8, 9], hy = [-12, -11, -13, -13];
+    const ang = [-0.25, -0.083, 0.1, -0.35];            // stick planted ahead on contact, lifted on passing/up
+    const flop = [0.6, 1.0, 0.6, 0.3], brd = [-1.0, -1.4, -1.0, -0.7], bob = [0, 1, 0, -1];
+    for (let f = 0; f < 8; f++) {
+      const p = f & 3, o = f * NPOSE;
+      WALK[o + HX] = hx[p]; WALK[o + HY] = hy[p]; WALK[o + ANG] = ang[p];
+      WALK[o + HDX] = 0; WALK[o + HDY] = 0; WALK[o + LEAN] = 0;
+      WALK[o + SWAY] = -1.2 * rN[f] / 4;                 // hem swings against the near foot
+      WALK[o + FLOP] = flop[p]; WALK[o + BRD] = brd[p]; WALK[o + BOB] = bob[p];
+      WALK[o + FTN] = -1 + rN[f]; WALK[o + FTF] = -1 + rF[f];
+      WALK[o + LFN] = lN[f]; WALK[o + LFF] = lF[f]; WALK[o + TOE] = 1;
+    }
+  })();
+
+  const S_LOCO = 0, S_CHARGE = 1, S_CAST = 2, S_RECOVER = 3;
+
+  const pose = new Float32Array(NPOSE);   // smooth, updated at 60 Hz
+  const from = new Float32Array(NPOSE);   // pose at state entry
+  const tmp = new Float32Array(NPOSE);    // locomotion target
+  const dPose = new Float32Array(NPOSE);  // held pose actually drawn
+  let state = S_LOCO, st = 0, tick = 0, holdCtr = HOLD, forceSample = true, fired = false;
+  let facing = 1, dFacing = 1, wizX = 48, walkW = 0, walkFrame = -1, idleT = 0;
+  let chargeT = 0, power = 0, castPower = 0;
+  let energy = 0.15, dEnergy = 0.15;
+  let gemFlick = false, gemPulse = 0, moteT = 0;
+  let shakeT = 0, shakeA = 1, flashT = 0, shX = 0, shY = 0;
+  let camF = 0, camWX = 0;
+  let burstOn = false, burstT = 0, burstX = 0, burstY = 0, burstS = 1;
+  let prjOn = false, prjX = 0, prjY = 0, prjY0 = 0, prjT = 0, prjDir = 1, prjTier = 0, prjSpeed = 160, prjPierce = false, prjHit = 0;
+  let score = 0, hasWalked = false, hasCast = false;
+
+  let reduceMotion = false;
+  try {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    reduceMotion = mq.matches;
+    if (mq.addEventListener) mq.addEventListener('change', function (e) { reduceMotion = e.matches; });
+  } catch (_) { /* ignore */ }
+
+  // ------------------------------------------------------------------ targets
+  const NT = 3;
+  const tType = new Uint8Array([0, 1, 0]);             // 0 archery board, 1 wisp
+  const tX = new Int16Array([150, 236, 322]);
+  const tPh = new Float32Array([0, 1.3, 2.6]);
+  const tAlive = new Uint8Array([1, 1, 1]);
+  const tTimer = new Float32Array(NT), tFade = new Float32Array(NT);
+  const tCX = new Int16Array(NT), tCY = new Int16Array(NT);
+  const RESPAWN = 3;
+
+  const BW = 17, BH = 38, BCX = 8, BCY = 11;          // board sprite, face centre
+  const boardBuf = new Uint8Array(BW * BH);
+  const WW = 9, WH = 10, WCX = 4, WCY = 5;             // wisp sprite
+  const wispA = new Uint8Array(WW * WH), wispB = new Uint8Array(WW * WH);
+
+  function bset(buf, bw, bh, x, y, c) { if (x >= 0 && x < bw && y >= 0 && y < bh) buf[y * bw + x] = c + 1; }
+  function bline(buf, bw, bh, x0, y0, x1, y1, c) {
+    const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1, dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      bset(buf, bw, bh, x0, y0, c);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+  (function buildTargets() {
+    // easel legs
+    bline(boardBuf, BW, BH, 5, 15, 2, 37, WOOD_D); bline(boardBuf, BW, BH, 6, 15, 3, 37, WOOD_L);
+    bline(boardBuf, BW, BH, 10, 15, 13, 37, WOOD_D); bline(boardBuf, BW, BH, 11, 15, 14, 37, WOOD_L);
+    for (let x = 4; x <= 12; x++) { bset(boardBuf, BW, BH, x, 28, WOOD_L); bset(boardBuf, BW, BH, x, 29, WOOD_D); }
+    // painted face
+    for (let y = 0; y < 24; y++) {
+      for (let x = 0; x < BW; x++) {
+        const dx = x - BCX, dy = y - BCY, d2 = dx * dx + dy * dy;
+        if (d2 > 40) continue;
+        const shade = dx - dy;                       // light from the upper right
+        let c;
+        if (d2 <= 2) c = GOLD;
+        else if (d2 <= 7) c = ROBE_L;
+        else if (d2 <= 16) c = shade < -3 ? BEARD_S : BEARD;
+        else if (d2 <= 27) c = shade < -4 ? ROBE_D : ROBE_L;
+        else c = shade < 0 ? WOOD_D : WOOD_L;
+        bset(boardBuf, BW, BH, x, y, c);
+      }
+    }
+    bset(boardBuf, BW, BH, 10, 8, WHITE);
+    // wisp flames
+    const A = ['....S....', '...SM....', '...MMS...', '..SMWMS..', '..MWWWMS.',
+               '.SMWWWMS.', '.SMeWeMS.', '.SMWWWMS.', '..SMMMS..', '...SSS...'];
+    const B = ['...S.....', '....MS...', '...SMM...', '..SMWMS..', '.SMWWWM..',
+               '.SMWWWMS.', '.SMeWeMS.', '.SMWWWMS.', '..SMMMS..', '...SSS...'];
+    function fill(buf, rows) {
+      for (let y = 0; y < WH; y++) for (let x = 0; x < WW; x++) {
+        const ch = rows[y][x];
+        if (ch === '.') continue;
+        bset(buf, WW, WH, x, y, ch === 'W' ? WHITE : ch === 'M' ? MOON : ch === 'S' ? MOON_S : OUT);
+      }
+    }
+    fill(wispA, A); fill(wispB, B);
+  })();
+
+  // ------------------------------------------------------------------ particle pool
+  const PMAX = 448;
+  const pX = new Float32Array(PMAX), pY = new Float32Array(PMAX);
+  const pVX = new Float32Array(PMAX), pVY = new Float32Array(PMAX);
+  const pAge = new Float32Array(PMAX), pLife = new Float32Array(PMAX);
+  const pAng = new Float32Array(PMAX), pRad = new Float32Array(PMAX);
+  const pW = new Float32Array(PMAX), pShr = new Float32Array(PMAX);
+  const pMode = new Uint8Array(PMAX);   // 0 free, 1 orbit, 2 ballistic, 3 drift
+  const pRamp = new Uint8Array(PMAX), pSize = new Uint8Array(PMAX);
+  let pCursor = 0;
+
+  function alloc() {
+    for (let n = 0; n < PMAX; n++) {
+      const i = pCursor;
+      pCursor = pCursor + 1 === PMAX ? 0 : pCursor + 1;
+      if (pMode[i] === 0) return i;
+    }
+    return -1;
+  }
+  function emit(x, y, vx, vy, life, mode, ramp, size) {
+    const i = alloc();
+    if (i < 0) return -1;
+    pMode[i] = mode; pX[i] = x; pY[i] = y; pVX[i] = vx; pVY[i] = vy;
+    pAge[i] = 0; pLife[i] = life; pRamp[i] = ramp; pSize[i] = size;
+    return i;
+  }
+  function radial(x, y, n, sMin, sMax, lMin, lMax, mode, ramp, bigEvery) {
+    for (let k = 0; k < n; k++) {
+      const a = Math.random() * TAU, sp = sMin + Math.random() * (sMax - sMin);
+      const big = bigEvery > 0 && k % bigEvery === 0 ? 2 : 1;
+      if (emit(x, y, Math.cos(a) * sp, Math.sin(a) * sp * 0.8 - 12, lMin + Math.random() * (lMax - lMin), mode, ramp, big) < 0) return;
+    }
+  }
+
+  function spawnOrbiter() {
+    const i = emit(0, 0, 0, 0, 0.45 + Math.random() * 0.45, 1, Math.random() < 0.3 ? R_PINK : R_MAGIC, Math.random() < 0.15 ? 2 : 1);
+    if (i < 0) return;
+    pAng[i] = Math.random() * TAU;
+    pRad[i] = 9 + Math.random() * 13;
+    pW[i] = (5.5 + Math.random() * 3) * dFacing;
+    pShr[i] = pRad[i] / pLife[i];
+    pX[i] = gemX + 0.5 + Math.cos(pAng[i]) * pRad[i];
+    pY[i] = gemY + 0.5 + Math.sin(pAng[i]) * pRad[i] * 0.72;
+  }
+  function spawnMote() {
+    emit(gemX + 0.5 + (Math.random() - 0.5) * 3, gemY + 0.5 + (Math.random() - 0.5) * 3,
+         (Math.random() - 0.5) * 6, -4 - Math.random() * 5, 0.9 + Math.random() * 0.8, 3, R_MOTE, 1);
+  }
+  function spawnTrail() {
+    emit(prjX - 2 * prjDir, prjY + (Math.random() - 0.5) * (3 + prjTier * 2),
+         -prjDir * (10 + Math.random() * 30), (Math.random() - 0.5) * 16,
+         0.18 + Math.random() * (0.3 + prjTier * 0.1), 3,
+         Math.random() < 0.35 ? R_PINK : R_MAGIC, Math.random() < 0.08 + prjTier * 0.08 ? 2 : 1);
+  }
+  function startBurst(x, y, s) { burstOn = true; burstT = 0; burstX = x; burstY = y; burstS = s; }
+  function impact(x, y) {
+    radial(x, y, 12, 20, 70, 0.25, 0.6, 2, R_MAGIC, 4);
+    startBurst(Math.floor(x), Math.floor(y), 0.35);
+  }
+
+  function fire() {
+    const p = castPower;
+    const gx = gemX + 0.5, gy = gemY + 0.5;
+    // sparks still orbiting are flung outward
+    for (let i = 0; i < PMAX; i++) {
+      if (pMode[i] !== 1) continue;
+      const dx = pX[i] - gx, dy = pY[i] - gy;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      pMode[i] = 2;
+      pVX[i] = dx / d * 75; pVY[i] = dy / d * 75;
+      pLife[i] = pAge[i] + 0.3 + Math.random() * 0.3;
+    }
+    const n = 14 + Math.round(50 * p);
+    radial(gx, gy, (n * 3) >> 2, 25, 60 + 50 * p, 0.35, 1.0, 2, R_MAGIC, 5);
+    radial(gx, gy, n >> 2, 25, 60 + 50 * p, 0.35, 0.9, 2, R_PINK, 0);
+    prjTier = p < 0.35 ? 0 : p < 0.8 ? 1 : 2;
+    prjOn = true; prjDir = dFacing; prjX = gx + 2 * prjDir; prjY0 = gy; prjY = gy; prjT = 0;
+    prjSpeed = 150 + 45 * p; prjPierce = prjTier === 2; prjHit = 0;
+    startBurst(gemX, gemY, 0.45 + 0.55 * p);
+    if (p > 0.5) flashT = 0.09;
+    shakeT = 0.08 + 0.18 * p; shakeA = p > 0.6 ? 2 : 1;
+    gemPulse = 6; hasCast = true;
+  }
+
+  function hitTarget(i) {
+    tAlive[i] = 0; tTimer[i] = 0; score++;
+    const x = tCX[i] + 0.5, y = tCY[i] + 0.5;
+    if (tType[i] === 0) {
+      radial(x, y, 22, 20, 80, 0.4, 0.9, 2, R_PAINT, 4);
+      radial(x, y + 6, 10, 20, 60, 0.4, 0.8, 2, R_WOOD, 0);
+      radial(x, y, 6, 30, 70, 0.3, 0.6, 2, R_MAGIC, 0);
+    } else {
+      radial(x, y, 24, 15, 60, 0.4, 1.0, 3, R_WISP, 5);
+      radial(x, y, 8, 20, 60, 0.3, 0.6, 2, R_MAGIC, 0);
+    }
+    if (shakeT < 0.08) { shakeT = 0.08; shakeA = 1; }
+  }
+
+  // ------------------------------------------------------------------ easing
+  function easeInOut(t) { return t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) * (-2 * t + 2) * (-2 * t + 2) / 2; }
+  function easeOutBack(t) { const u = t - 1; return 1 + 2.70158 * u * u * u + 1.70158 * u * u; }
+  function lerpPose(a, b, k, kFeet) {
+    for (let i = 0; i < NPOSE; i++) pose[i] = a[i] + (b[i] - a[i]) * (i >= BOB ? kFeet : k);
+  }
+
+  function enter(s) {
+    state = s; st = 0; from.set(pose); forceSample = true; holdCtr = HOLD; fired = false;
+    if (s === S_CHARGE) { chargeT = 0; power = 0; walkW = 0; walkFrame = -1; }
+    if (s === S_LOCO) idleT = 0;
+  }
+
+  // ------------------------------------------------------------------ input
+  let kL = false, kR = false, kC = false, castLatch = false, lastDir = 1, castPrev = false;
+  const tCount = new Int16Array(3);                  // touch presses on left / right / cast
+  function dirInput() {
+    const l = kL || tCount[0] > 0, r = kR || tCount[1] > 0;
+    if (l && r) return lastDir;
+    return r ? 1 : l ? -1 : 0;
+  }
+
+  // ------------------------------------------------------------------ rig (from held pose)
+  let handX = 0, handY = 0, stS = 0, stC = 1, staffShallow = false;
+  let gemSX = 0, gemSY = 0, gemX = 0, gemY = 0;
+  const ANG_Q = TAU / 64;
+  function computeRig() {
+    const a = Math.round(dPose[ANG] / ANG_Q) * ANG_Q;
+    stS = Math.sin(a); stC = Math.cos(a);
+    staffShallow = Math.abs(stS) > 0.7;
+    handX = SOX + Math.round(dPose[HX]);
+    handY = SOY + Math.round(dPose[HY]);
+    const gx = Math.floor(handX + 0.5 + stS * 16.5);
+    gemSY = Math.floor(handY + 0.5 - stC * 16.5);
+    gemSX = dFacing > 0 ? gx : 2 * SOX - gx;
+    gemX = wizX + gemSX - SOX;
+    gemY = FLOOR + gemSY - SOY;
+  }
+
+  // ------------------------------------------------------------------ locomotion
+  function stepWalk(dir) {
+    if (dir !== 0 && dir !== facing) facing = dir;
+    const blocked = (dir > 0 && wizX >= X_MAX) || (dir < 0 && wizX <= X_MIN);
+    const want = dir !== 0 && !blocked ? 1 : 0;
+    if (walkW < want) walkW = Math.min(1, walkW + 0.5);
+    else if (walkW > want) walkW = Math.max(0, walkW - 0.5);
+    if (walkW > 0) {
+      walkFrame = (walkFrame + 1) & 7;
+      wizX += facing * Math.round(WALK_STEP * walkW);
+      if (wizX < X_MIN) wizX = X_MIN; else if (wizX > X_MAX) wizX = X_MAX;
+      idleT = 0; hasWalked = true;
+    } else walkFrame = -1;
+  }
+  function locoPose() {
+    const t = idleT, ib = Math.floor(t * 1.7) & 1;
+    tmp.set(K_IDLE);
+    tmp[BOB] = ib;
+    tmp[SWAY] += Math.sin(t * 2.1) * 0.75;
+    tmp[BRD] += Math.sin(t * 2.9);
+    tmp[FLOP] += ib * 0.6;
+    if (walkW > 0 && walkFrame >= 0) {
+      const o = walkFrame * NPOSE;
+      for (let i = 0; i < NPOSE; i++) tmp[i] += (WALK[o + i] - tmp[i]) * walkW;
+    }
+  }
+
+  // ------------------------------------------------------------------ update (fixed 60 Hz)
+  function update() {
+    tick++; st += DT;
+    let frameEdge = false;
+    if (--holdCtr <= 0) { holdCtr = HOLD; frameEdge = true; }
+    const castHeld = kC || tCount[2] > 0 || castLatch;
+    castLatch = false;
+    const castUp = !castHeld && castPrev;
+    castPrev = castHeld;
+    const dir = dirInput();
+    let fireNow = false;
+
+    switch (state) {
+      case S_LOCO: {
+        if (castHeld) { enter(S_CHARGE); break; }
+        if (frameEdge) stepWalk(dir);
+        idleT += DT;
+        locoPose();
+        const k = easeInOut(Math.min(1, st / 0.2));
+        lerpPose(from, tmp, k, k);
+        energy += (0.15 + 0.07 * Math.sin(idleT * 4) - energy) * 0.08;
+        if (tick % 3 === 0) gemFlick = Math.random() < 0.08;
+        if (walkW === 0) {
+          moteT -= DT;
+          if (moteT <= 0) { moteT = 0.28 + Math.random() * 0.3; spawnMote(); }
+        }
+        break;
+      }
+      case S_CHARGE: {
+        chargeT += DT;
+        power = Math.min(1, chargeT / 1.4);
+        if (frameEdge && dir !== 0 && dir !== facing) facing = dir;     // can turn to aim, can't walk
+        if (castUp) { castPower = Math.max(0.12, power); enter(S_CAST); break; }
+        lerpPose(from, K_CHARGE, easeInOut(Math.min(1, st / 1.05)), Math.min(1, st / 0.2));
+        if (power > 0.5) {
+          const j = (power - 0.5) * 1.8;
+          pose[HX] += (Math.random() - 0.5) * j;
+          pose[HY] += (Math.random() - 0.5) * j;
+        }
+        energy = 0.15 + 0.95 * easeInOut(Math.min(1, power * 1.05));
+        if (tick % 2 === 0) gemFlick = Math.random() < 0.25 + power * 0.6;
+        for (let n = 0.35 + power * 1.2; n > 0; n -= 1) if (Math.random() < n) spawnOrbiter();
+        break;
+      }
+      case S_CAST: {
+        const k = easeOutBack(Math.min(1, st / 0.12));
+        lerpPose(from, K_CAST, k, Math.min(1, k));
+        if (!fired && st >= 0.095) { fired = true; fireNow = true; forceSample = true; energy = 1.1 + 1.1 * castPower; }
+        if (fired) energy += (0.3 + 0.4 * castPower - energy) * 0.06;
+        gemFlick = fired;
+        if (st >= 0.35 + 0.2 * castPower) enter(S_RECOVER);
+        break;
+      }
+      case S_RECOVER: {
+        const dur = 0.6 + 0.45 * castPower;
+        const k = easeInOut(Math.min(1, st / dur));
+        lerpPose(from, K_IDLE, k, k);
+        energy += (0.15 - energy) * 0.05;
+        gemFlick = false;
+        if (st > 0.3 && castHeld) enter(S_CHARGE);
+        else if (st >= dur || (st > 0.35 && dir !== 0)) enter(S_LOCO);
+        break;
+      }
+    }
+
+    // sample the smooth pose onto the pixel grid at sprite cadence
+    if (frameEdge || forceSample) {
+      forceSample = false;
+      dPose.set(pose); dEnergy = energy; dFacing = facing;
+      computeRig();
+      buildSprite();
+      sampleTargets();
+    }
+    if (fireNow) fire();
+
+    // camera: eases toward the wizard with a little look-ahead, snapped to whole pixels
+    let target = wizX - (W >> 1) + facing * 12;
+    if (target < 0) target = 0; else if (target > LEVEL_W - W) target = LEVEL_W - W;
+    camF += (target - camF) * 0.08;
+    camWX = Math.round(camF);
+
+    // effects
+    if (shakeT > 0) shakeT -= DT;
+    if (shakeT > 0 && !reduceMotion) {
+      const a = shakeT > 0.13 ? shakeA : 1;
+      shX = ((tick >> 1) & 1) ? a : -a;
+      shY = ((tick / 3) | 0) & 1;
+    } else { shX = 0; shY = 0; }
+    if (flashT > 0) flashT -= DT;
+    if (gemPulse > 0) gemPulse--;
+    if (burstOn) { burstT += DT; if (burstT > 0.3) burstOn = false; }
+
+    for (let i = 0; i < NT; i++) {
+      if (!tAlive[i]) {
+        tTimer[i] += DT;
+        if (tTimer[i] >= RESPAWN) { tAlive[i] = 1; tFade[i] = 0.45; }
+      } else if (tFade[i] > 0) tFade[i] -= DT;
+    }
+
+    if (prjOn) {
+      prjT += DT;
+      prjX += prjDir * prjSpeed * DT;
+      prjY = prjY0 + Math.sin(prjT * 28) * (prjTier === 0 ? 0.8 : 1.3);
+      spawnTrail();
+      if (prjTier > 0 && (tick & 1) === 0) spawnTrail();
+      if (prjTier > 1) spawnTrail();
+      const br = prjTier + 1;
+      for (let i = 0; i < NT; i++) {
+        if (!tAlive[i] || (prjHit & (1 << i))) continue;
+        const hw = tType[i] === 0 ? 6 : 4, hh = tType[i] === 0 ? 6 : 5;
+        const dx = prjX - (tCX[i] + 0.5), dy = prjY - (tCY[i] + 0.5);
+        if (dx < -hw - br || dx > hw + br || dy < -hh - br || dy > hh + br) continue;
+        prjHit |= 1 << i;
+        hitTarget(i);
+        if (!prjPierce) { prjOn = false; impact(prjX, prjY); break; }
+      }
+      if (prjOn) {
+        if (prjX < PILLAR_W || prjX > LEVEL_W - PILLAR_W) { prjOn = false; impact(prjX, prjY); }
+        else if (prjX < camWX - 24 || prjX > camWX + W + 24) prjOn = false;
+      }
+    }
+
+    for (let i = 0; i < PMAX; i++) {
+      const m = pMode[i];
+      if (m === 0) continue;
+      pAge[i] += DT;
+      if (pAge[i] >= pLife[i]) { pMode[i] = 0; continue; }
+      if (m === 1) {
+        pAng[i] += pW[i] * DT;
+        pRad[i] -= pShr[i] * DT;
+        if (pRad[i] <= 0.8) { pMode[i] = 0; gemPulse = 3; continue; }
+        pX[i] = gemX + 0.5 + Math.cos(pAng[i]) * pRad[i];
+        pY[i] = gemY + 0.5 + Math.sin(pAng[i]) * pRad[i] * 0.72;
+      } else {
+        const drag = m === 2 ? 0.945 : 0.965, g = m === 2 ? 42 : -9;
+        pVX[i] *= drag;
+        pVY[i] = pVY[i] * drag + g * DT;
+        pX[i] += pVX[i] * DT;
+        pY[i] += pVY[i] * DT;
+        if (pY[i] >= FLOOR && pVY[i] > 0) { pY[i] = FLOOR - 0.01; pVY[i] *= -0.35; pVX[i] *= 0.75; }
+      }
+    }
+  }
+
+  function sampleTargets() {
+    const t = tick * DT;
+    for (let i = 0; i < NT; i++) {
+      if (tType[i] === 0) { tCX[i] = tX[i]; tCY[i] = FLOOR - 27; }
+      else {
+        tCX[i] = tX[i] + Math.round(Math.sin(t * 0.6 + tPh[i]) * 4);
+        tCY[i] = FLOOR - 28 + Math.round(Math.sin(t * 1.15 + tPh[i]) * 10);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ raster helpers
+  function px(x, y, c) {                       // screen space, shaken
+    x += shX; y += shY;
+    if (x >= 0 && x < W && y >= 0 && y < H) fb[y * W + x] = c;
+  }
+  function wpx(x, y, c) { px(x - camWX, y, c); }          // world space
+  function upx(x, y, c) {                      // UI space, never shaken
+    if (x >= 0 && x < W && y >= 0 && y < H) fb[y * W + x] = c;
+  }
+  function dwpx(x, y, c, dither) { if (!dither || ((x + y) & 1) === 0) wpx(x, y, c); }
+  function cp(x, y, c) {                       // sprite space, mirrored by facing
+    if (dFacing < 0) x = 2 * SOX - x;
+    if (x >= 0 && x < SW && y >= 0 && y < SH) sb[y * SW + x] = c + 1;
+  }
+  function plot8(cx, cy, x, y, c, d) {
+    dwpx(cx + x, cy + y, c, d); dwpx(cx - x, cy + y, c, d);
+    dwpx(cx + x, cy - y, c, d); dwpx(cx - x, cy - y, c, d);
+    dwpx(cx + y, cy + x, c, d); dwpx(cx - y, cy + x, c, d);
+    dwpx(cx + y, cy - x, c, d); dwpx(cx - y, cy - x, c, d);
+  }
+  function circle(cx, cy, r, c, dither) {
+    let x = r, y = 0, err = 1 - r;
+    while (x >= y) {
+      plot8(cx, cy, x, y, c, dither);
+      y++;
+      if (err < 0) err += 2 * y + 1;
+      else { x--; err += 2 * (y - x) + 1; }
+    }
+  }
+
+  // sprite line ops: 0 sleeve, 1 staff shadow, 2 staff
+  function plotOp(x, y, op) {
+    if (op === 0) { cp(x, y - 1, ROBE_L); cp(x, y, ROBE_L); cp(x, y + 1, ROBE_D); return; }
+    if (y >= SOY) return;
+    if (op === 1) { if (staffShallow) cp(x, y + 1, WOOD_D); else cp(x - 1, y, WOOD_D); }
+    else cp(x, y, WOOD_L);
+  }
+  function lineOp(x0, y0, x1, y1, op) {
+    const dx = Math.abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    const dy = -Math.abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    let err = dx + dy;
+    for (;;) {
+      plotOp(x0, y0, op);
+      if (x0 === x1 && y0 === y1) break;
+      const e2 = 2 * err;
+      if (e2 >= dy) { err += dy; x0 += sx; }
+      if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+  }
+
+  let spX = 0, spY = 0;
+  function hatSpine(s, bx, by, flop) {
+    const e = s > 0.55 ? s - 0.55 : 0;
+    spX = bx - s * s * 3.0 - e * (4.5 + flop * 1.2);
+    spY = by - s * 10 + e * e * (16 + flop * 9);
+  }
+  function hatDisc(cx, cy, r, tx, ty, maxY) {
+    const x0 = Math.floor(cx - r), x1 = Math.floor(cx + r);
+    const y0 = Math.floor(cy - r), y1 = Math.min(Math.floor(cy + r), maxY);
+    const r2 = r * r;
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+        if (dx * dx + dy * dy > r2) continue;
+        const al = dx * tx + dy * ty;
+        const lit = (dx - al * tx) * 0.8 - (dy - al * ty) * 0.6;
+        cp(x, y, lit > 0.2 ? ROBE_L : lit < -1.5 ? ROBE_X : ROBE_D);
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ wizard sprite
+  // Drawn in right-facing sprite space from dPose alone; cp() mirrors for facing = -1.
+  function buildSprite() {
+    sb.fill(0);
+    const ox = SOX, oy = SOY;
+    const bob = Math.round(dPose[BOB]);
+    const lean = Math.round(dPose[LEAN]);
+    const sway = dPose[SWAY];
+    const hdx = Math.round(dPose[HDX]), hdy = Math.round(dPose[HDY]);
+    const flop = Math.round(dPose[FLOP] * 2) / 2;
+    const bsw = dPose[BRD];
+    const sh = oy - 17 + bob;    // shoulder row
+    const hem = oy - 3;          // hem row
+
+    // boots: far foot first, near foot (with highlight) on top
+    const ff = ox + Math.round(dPose[FTF]), lf = Math.round(dPose[LFF]);
+    const fn = ox + Math.round(dPose[FTN]), ln = Math.round(dPose[LFN]);
+    for (let x = 0; x < 3; x++) { cp(ff + x, oy - 2 - lf, WOOD_D); cp(ff + x, oy - 1 - lf, WOOD_D); }
+    if (dPose[TOE] >= 0.5) cp(ff + 3, oy - 1 - lf, WOOD_D);
+    for (let x = 0; x < 3; x++) { cp(fn + x, oy - 2 - ln, WOOD_D); cp(fn + x, oy - 1 - ln, WOOD_D); }
+    cp(fn + 3, oy - 1 - ln, WOOD_D); cp(fn + 2, oy - 2 - ln, WOOD_L);
+
+    // robe: two-shade trapezoid, lean at the top, sway at the hem
+    const span = hem - sh;
+    for (let y = sh; y <= hem; y++) {
+      const t = (y - sh) / span;
+      const shift = Math.round(lean * (1 - t) + sway * t * t);
+      let l = Math.round(-3 - 3.6 * t), r = Math.round(2 + 3.6 * t);
+      if (y === sh) { l++; r--; } else if (y === hem) { l--; r++; }
+      const mid = l + (r - l) * 0.42;
+      const fold = Math.round(l + (r - l) * 0.74);
+      const trim = y === hem || y === sh + 7;
+      for (let x = l; x <= r; x++) {
+        let c;
+        if (trim) c = x < mid ? WOOD_L : GOLD;
+        else if (x === l && y > sh + 1) c = ROBE_X;
+        else if (x < mid) c = ROBE_D;
+        else if (t > 0.5 && x === fold) c = ROBE_D;
+        else c = ROBE_L;
+        cp(ox + x + shift, y, c);
+      }
+      if (y === sh + 8 || y === sh + 9) cp(ox + r - 1 + shift, y, GOLD);          // sash tail
+      if (y === sh + 11) cp(ox + Math.round(mid) + 2 + shift, y, GOLD);             // embroidery
+      if (y === sh + 4) cp(ox + l + 1 + shift, y, WOOD_L);
+    }
+
+    // sleeve (before the beard so the beard hangs in front)
+    lineOp(ox + lean + 1, sh + 2, handX - 1, handY, 0);
+    cp(handX - 1, handY - 1, GOLD); cp(handX - 1, handY, GOLD); cp(handX - 1, handY + 1, GOLD);
+    cp(handX - 2, handY + 2, ROBE_D);
+
+    // head
+    const hx = ox + 1 + lean + hdx;
+    const F = sh - 5 + hdy;
+    for (let y = F; y <= F + 3; y++) {
+      cp(hx - 1, y, BEARD);
+      for (let x = hx; x <= hx + 2; x++) cp(x, y, SKIN);
+    }
+    cp(hx - 2, F + 1, BEARD_S); cp(hx - 2, F + 2, BEARD_S); cp(hx - 2, F + 3, BEARD_S);
+    cp(hx, F + 2, SKIN_S);
+    cp(hx + 3, F + 2, SKIN);
+    cp(hx + 1, F, BEARD); cp(hx + 2, F, BEARD);
+    cp(hx + 1, F + 1, dEnergy > 1.2 ? CYAN : OUT);
+
+    // beard
+    for (let x = hx; x <= hx + 3; x++) cp(x, F + 3, BEARD);
+    cp(hx + 4, F + 4, BEARD_S);
+    for (let k = 1; k <= 10; k++) {
+      const y = F + 3 + k, tk = k / 10;
+      const s = Math.round(bsw * tk * tk);
+      const l = hx - 1 + Math.floor(k * 0.2) + s;
+      let r = hx + 3 - Math.floor(k * 0.36) + s;
+      if (r < l) r = l;
+      for (let x = l; x <= r; x++) {
+        const streak = k > 1 && x < r && ((x - s + k) % 3 === 0);
+        cp(x, y, (x === l && l !== r) || streak ? BEARD_S : BEARD);
+      }
+    }
+
+    // hat: swept cone along a bent spine, then band and brim
+    const bxC = hx + 0.5, byC = F - 2;
+    for (let i = 0; i <= 48; i++) {
+      const s = i / 48;
+      hatSpine(s + 0.01, bxC, byC, flop);
+      const nx = spX, ny = spY;
+      hatSpine(s, bxC, byC, flop);
+      let tx = nx - spX, ty = ny - spY;
+      const tl = Math.sqrt(tx * tx + ty * ty) || 1;
+      tx /= tl; ty /= tl;
+      hatDisc(spX, spY, 2.3 * Math.pow(1 - s, 0.85) + 0.45, tx, ty, F - 3);
+    }
+    hatSpine(0.3, bxC, byC, flop);
+    cp(Math.floor(spX + 1), Math.floor(spY), GOLD);
+    for (let x = hx - 3; x <= hx + 4; x++) cp(x, F - 2, x < hx + 1 ? WOOD_L : GOLD);
+    for (let x = hx - 4; x <= hx + 5; x++) cp(x, F - 1, x < hx + 1 ? ROBE_D : ROBE_L);
+    cp(hx - 4, F, ROBE_D); cp(hx + 5, F, ROBE_L);
+
+    // staff through the hand, gem prongs, fist
+    const ax = handX + 0.5, ay = handY + 0.5;
+    const sx0 = Math.floor(ax - stS * 12), sy0 = Math.floor(ay + stC * 12);
+    const sx1 = Math.floor(ax + stS * 15), sy1 = Math.floor(ay - stC * 15);
+    lineOp(sx0, sy0, sx1, sy1, 1);
+    lineOp(sx0, sy0, sx1, sy1, 2);
+    const pcx = ax + stS * 15.3, pcy = ay - stC * 15.3;
+    cp(Math.floor(pcx + stC * 1.7), Math.floor(pcy + stS * 1.7), GOLD);
+    cp(Math.floor(pcx - stC * 1.7), Math.floor(pcy - stS * 1.7), GOLD);
+    cp(handX, handY, SKIN); cp(handX + 1, handY, SKIN);
+    cp(handX, handY + 1, SKIN_S); cp(handX + 1, handY + 1, SKIN);
+  }
+
+  // ------------------------------------------------------------------ scene drawing (into fb)
+  function skyBand(x, y) {
+    if (y < 17) return 0;
+    if (y < 19) return (x + y) & 1;
+    if (y < 37) return 1;
+    if (y < 39) return 1 + ((x + y) & 1);
+    if (y < 55) return 2;
+    if (y < 57) return 2 + ((x + y) & 1);
+    return 3;
+  }
+
+  function drawSky() {
+    const lift = flashT > 0 && !reduceMotion ? 1 : 0;
+    for (let y = 0; y < H; y++) {
+      const wy = y - shY, row = y * W;
+      for (let x = 0; x < W; x++) fb[row + x] = SKY1 + skyBand(x - shX, wy) + lift;
+    }
+  }
+
+  function drawStars() {
+    const t = ((tick / HOLD) | 0) * (HOLD * DT);
+    const o = Math.floor(camWX * PAR_STAR);
+    for (let i = 0; i < NSTAR; i++) {
+      const v = Math.sin(t * starSp[i] + starPh[i]);
+      px(starX[i] - o, starY[i], v > 0.75 ? WHITE : v > 0 ? BEARD : v > -0.55 ? MOON_S : GLOW);
+    }
+  }
+
+  function drawMoon() {
+    const cx = MX - Math.floor(camWX * PAR_MOON);
+    const ro2 = (MR + 3.5) * (MR + 3.5), ri2 = (MR + 1.5) * (MR + 1.5), rd2 = MR * MR + MR * 0.6;
+    const rs2 = (MR + 0.5) * (MR + 0.5);
+    for (let dy = -MR - 4; dy <= MR + 4; dy++) {
+      for (let dx = -MR - 4; dx <= MR + 4; dx++) {
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= rd2) {
+          const sx = dx - 2, sy = dy + 2;
+          px(cx + dx, MY + dy, sx * sx + sy * sy > rs2 ? MOON_S : MOON);
+        } else if (d2 > ri2 && d2 <= ro2 && ((dx + dy) & 1) === 0) {
+          px(cx + dx, MY + dy, SKY3);
+        }
+      }
+    }
+    for (let i = 0; i < CRATERS.length; i += 2) px(cx + CRATERS[i], MY + CRATERS[i + 1], MOON_S);
+  }
+
+  function drawHills() {
+    const of = Math.floor(camWX * PAR_FAR) + 4, on = Math.floor(camWX * PAR_NEAR) + 4;
+    for (let x = -3; x < W + 3; x++) {
+      const top = farTop[x + of];
+      for (let y = top; y < FLOOR; y++) px(x, y, y === top ? SKY3 : SKY2);
+    }
+    for (let x = -3; x < W + 3; x++) {
+      const top = nearTop[x + on];
+      for (let y = top; y < FLOOR; y++) px(x, y, y === top ? SKY2 : SKY1);
+    }
+  }
+
+  function drawPillar(x0, inner) {
+    const flick = ((tick / HOLD) | 0) & 1;
+    for (let wy = PILLAR_TOP; wy < FLOOR; wy++) {
+      const ly = wy - PILLAR_TOP;
+      for (let lx = 0; lx < PILLAR_W; lx++) {
+        let c;
+        if (lx === inner) c = OUT;
+        else if (ly < 3) c = ly === 0 ? ST_L : ly === 2 ? ST_D : ST_M;
+        else {
+          const row = ((ly - 3) / 4) | 0, ir = (ly - 3) % 4, bx = (lx + ((row & 1) ? 3 : 0)) % 6;
+          c = ir === 3 || bx === 0 ? ST_D : ir === 0 && bx < 3 ? ST_L : ST_M;
+        }
+        wpx(x0 + lx, wy, c);
+      }
+    }
+    // brazier
+    const bx = x0 + 5, by = PILLAR_TOP - 1;
+    for (let x = -3; x <= 2; x++) wpx(bx + x, by, x === -3 || x === 2 ? OUT : WOOD_D);
+    for (let x = -2; x <= 1; x++) wpx(bx + x, by - 1, x === -2 || x === 1 ? ROBE_L : GOLD);
+    wpx(bx - 1, by - 2, GOLD); wpx(bx, by - 2, flick ? WHITE : GOLD);
+    wpx(bx - 1 + flick, by - 3, GOLD);
+    wpx(bx - flick, by - 4, ROBE_L);
+  }
+
+  function drawFloor() {
+    for (let wy = FLOOR; wy < H + 3; wy++) {
+      const r = wy - FLOOR;
+      for (let x = -3; x < W + 3; x++) {
+        const wx = x + camWX;
+        let c;
+        if (r === 0) c = ST_L;
+        else {
+          const rr = r - 1, row = (rr / 5) | 0, ir = rr % 5;
+          const bx = (wx + ((row & 1) ? 6 : 0) + 240) % 12;
+          const deep = row >= 2;
+          if (ir === 4 || bx === 0) c = deep ? OUT : ST_D;
+          else if (ir === 0 && bx < 3) c = deep ? ST_M : ST_L;
+          else c = deep ? ST_D : ST_M;
+          if (!deep && ir === 2 && ((wx * 7 + row * 13 + 240) % 23) === 0) c = ST_D;   // chips
+          if (row === 1 && ir === 3 && ((wx + wy) & 1) && c === ST_M) c = ST_D;       // depth dither
+        }
+        px(x, wy, c);
+      }
+    }
+  }
+
+  function drawGroundFx() {
+    for (let x = -7; x <= 7; x++) wpx(wizX + x, FLOOR, ST_D);
+    for (let x = -5; x <= 5; x++) wpx(wizX + x, FLOOR + 1, ST_D);
+    const e = dEnergy;
+    if (e > 0.3) {
+      const R = Math.round(2 + e * 9);
+      for (let dx = -R; dx <= R; dx++) {
+        const x = gemX + dx, d = dx < 0 ? -dx : dx;
+        if (d * 3 <= R) wpx(x, FLOOR, CYAN);
+        else if (d * 3 <= R * 2 || ((x & 1) === 0)) wpx(x, FLOOR, BLUE);
+        if (d * 2 <= R && ((x + FLOOR + 1) & 1) === 0) wpx(x, FLOOR + 1, BLUE);
+      }
+    }
+    if (prjOn) {
+      const cx = Math.floor(prjX);
+      for (let dx = -4; dx <= 4; dx++) {
+        const x = cx + dx, d = dx < 0 ? -dx : dx;
+        if (d <= 1) wpx(x, FLOOR, CYAN);
+        else if (d <= 2 || ((x & 1) === 0)) wpx(x, FLOOR, BLUE);
+      }
+    }
+  }
+
+  function drawHalo() {
+    const e = dEnergy;
+    const r = Math.round(2.5 + e * 3.2), r2 = r * r, ri2 = r2 * 0.3;
+    const inner = e < 0.4 ? VIOLET : e < 1.3 ? BLUE : CYAN;
+    const outer = e < 0.4 ? GLOW : e < 1.3 ? VIOLET : BLUE;
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        const d2 = dx * dx + dy * dy;
+        if (d2 > r2 || ((gemX + dx + gemY + dy) & 1)) continue;
+        wpx(gemX + dx, gemY + dy, d2 <= ri2 ? inner : outer);
+      }
+    }
+  }
+
+  // generic layer blit with auto outline. mode 0 normal, 1 white flash, 2 dithered fade-in
+  function blitLayer(buf, bw, bh, sx, sy, mode) {
+    for (let y = 0; y < bh; y++) {
+      const Y = sy + y;
+      if (Y < 0 || Y >= H) continue;
+      for (let x = 0; x < bw; x++) {
+        const X = sx + x;
+        if (X < 0 || X >= W) continue;
+        if (mode === 2 && ((X + Y) & 1)) continue;
+        const i = y * bw + x, v = buf[i];
+        if (v) fb[Y * W + X] = mode === 1 ? WHITE : v - 1;
+        else if ((x > 0 && buf[i - 1]) || (x < bw - 1 && buf[i + 1]) || (y > 0 && buf[i - bw]) || (y < bh - 1 && buf[i + bw])) fb[Y * W + X] = OUT;
+      }
+    }
+  }
+
+  function drawTargets() {
+    const wf = ((tick / HOLD) | 0) & 1;
+    for (let i = 0; i < NT; i++) {
+      let mode = 0;
+      if (!tAlive[i]) { if (tTimer[i] < 0.1) mode = 1; else continue; }
+      else if (tFade[i] > 0) mode = 2;
+      const cx = tCX[i], cy = tCY[i];
+      if (tType[i] === 0) {
+        blitLayer(boardBuf, BW, BH, cx - BCX - camWX + shX, cy - BCY + shY, mode);
+      } else {
+        if (mode === 0) {
+          for (let dy = -7; dy <= 7; dy++) for (let dx = -7; dx <= 7; dx++) {
+            const d2 = dx * dx + dy * dy;
+            if (d2 > 42 && d2 <= 56 && ((cx + dx + cy + dy) & 1) === 0) wpx(cx + dx, cy + dy, GLOW);
+          }
+        }
+        blitLayer(wf ? wispB : wispA, WW, WH, cx - WCX - camWX + shX, cy - WCY + shY, mode);
+      }
+    }
+  }
+
+  // wizard layer -> fb, with auto outline and a 1px rim light facing the gem
+  function compositeWizard() {
+    const e = dEnergy;
+    const R = 9 + e * 9, R2 = R * R, RH2 = R2 * 0.2;
+    const lo = e < 0.5 ? VIOLET : e < 1.4 ? BLUE : CYAN;
+    const hi = e < 0.5 ? BLUE : e < 1.4 ? CYAN : WHITE;
+    const gx = gemSX, gy = gemSY;
+    const bx = wizX - SOX - camWX + shX, by = FLOOR - SOY + shY;
+    for (let y = 0; y < SH; y++) {
+      const Y = by + y;
+      if (Y < 0 || Y >= H) continue;
+      for (let x = 0; x < SW; x++) {
+        const X = bx + x;
+        if (X < 0 || X >= W) continue;
+        const i = y * SW + x, v = sb[i];
+        if (v) {
+          let c = v - 1;
+          const dx = gx - x, dy = gy - y, d2 = dx * dx + dy * dy;
+          if (d2 < R2) {
+            const ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+            const sx = ax * 2 >= ay ? (dx > 0 ? 1 : dx < 0 ? -1 : 0) : 0;
+            const sy = ay * 2 >= ax ? (dy > 0 ? 1 : dy < 0 ? -1 : 0) : 0;
+            const nx = x + sx, ny = y + sy;
+            if ((sx !== 0 || sy !== 0) && (nx < 0 || nx >= SW || ny < 0 || ny >= SH || sb[ny * SW + nx] === 0)) {
+              c = d2 < RH2 ? hi : lo;
+            }
+          }
+          fb[Y * W + X] = c;
+        } else if ((x > 0 && sb[i - 1]) || (x < SW - 1 && sb[i + 1]) || (y > 0 && sb[i - SW]) || (y < SH - 1 && sb[i + SW])) {
+          fb[Y * W + X] = OUT;
+        }
+      }
+    }
+  }
+
+  function drawGem() {
+    const x = gemX, y = gemY, e = dEnergy;
+    const hot = gemFlick || gemPulse > 0;
+    if (e > 0.8 || (hot && state !== S_LOCO)) {
+      wpx(x, y - 2, BLUE); wpx(x, y + 2, BLUE); wpx(x - 2, y, BLUE); wpx(x + 2, y, BLUE);
+      wpx(x - 1, y - 1, BLUE); wpx(x + 1, y - 1, BLUE); wpx(x - 1, y + 1, BLUE); wpx(x + 1, y + 1, BLUE);
+    }
+    const arm = e > 0.6 ? CYAN : BLUE;
+    wpx(x, y - 1, arm); wpx(x - 1, y, arm); wpx(x + 1, y, arm); wpx(x, y + 1, arm);
+    wpx(x, y, hot ? WHITE : CYAN);
+  }
+
+  function drawBurst() {
+    if (!burstOn) return;
+    const t = burstT, x = burstX, y = burstY;
+    const r = Math.round(2 + t * 72 * burstS);
+    circle(x, y, r, t < 0.05 ? WHITE : t < 0.11 ? CYAN : t < 0.18 ? BLUE : VIOLET, t > 0.14);
+    if (t < 0.16) circle(x, y, Math.round(r * 0.55), t < 0.08 ? WHITE : CYAN, true);
+    if (t < 0.13) {
+      const L = Math.round((t < 0.07 ? 7 : 4) * (0.5 + 0.5 * burstS));
+      for (let k = 2; k <= L; k++) {
+        const c = k < 4 ? WHITE : CYAN;
+        wpx(x + k, y, c); wpx(x - k, y, c); wpx(x, y + k, c); wpx(x, y - k, c);
+      }
+      if (burstS > 0.6) for (let k = 2; k <= 3; k++) {
+        wpx(x + k, y + k, CYAN); wpx(x - k, y + k, CYAN); wpx(x + k, y - k, CYAN); wpx(x - k, y - k, CYAN);
+      }
+    }
+  }
+
+  function drawProjectile() {
+    if (!prjOn) return;
+    const x = Math.floor(prjX), y = Math.floor(prjY), d = prjDir;
+    const flick = (tick >> 1) & 1;
+    const R = prjTier + 1;
+    wpx(x - (R + 1) * d, y, BLUE); wpx(x - (R + 2) * d, y, VIOLET); wpx(x - (R + 3) * d, y, VIOLET);
+    if (flick) wpx(x - (R + 4) * d, y, VIOLET); else wpx(x - (R + 2) * d, y - 1, VIOLET);
+    for (let dy = -R; dy <= R; dy++) {
+      for (let dx = -R; dx <= R; dx++) {
+        const m = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+        if (m > R) continue;
+        const c = m === 0 ? WHITE : m < R ? (m === 1 ? CYAN : BLUE) : (R === 1 ? CYAN : flick ? PINK : BLUE);
+        wpx(x + dx, y + dy, c);
+      }
+    }
+    if (flick) wpx(x + (R + 1) * d, y, WHITE);
+  }
+
+  function drawParticles() {
+    for (let i = 0; i < PMAX; i++) {
+      if (pMode[i] === 0) continue;
+      let step = (pAge[i] / pLife[i] * 6) | 0;
+      if (step > 5) step = 5;
+      const base = pRamp[i] * 6;
+      const c = RAMPS[base + step];
+      const x = Math.floor(pX[i]), y = Math.floor(pY[i]);
+      if (pSize[i] === 2 && step < 3) {
+        const c2 = RAMPS[base + step + 1];
+        wpx(x - 1, y, c2); wpx(x + 1, y, c2); wpx(x, y - 1, c2); wpx(x, y + 1, c2);
+      }
+      wpx(x, y, c);
+    }
+  }
+
+  // ------------------------------------------------------------------ UI
+  function drawText(s, x, y, c) {
+    for (let i = 0; i < s.length; i++, x += 4) {
+      const g = GLYPH[s.charCodeAt(i) & 127];
+      if (!g) continue;
+      for (let r = 0; r < 5; r++) for (let k = 0; k < 3; k++) {
+        if ((g >> ((4 - r) * 3 + (2 - k))) & 1) upx(x + k, y + r, c);
+      }
+    }
+    return x;
+  }
+  function drawNum(n, x, y, c) {
+    let digits = 1;
+    for (let v = n; v >= 10; v = (v / 10) | 0) digits++;
+    let xx = x + (digits - 1) * 4;
+    do { drawText(DIGITS[n % 10], xx, y, c); n = (n / 10) | 0; xx -= 4; } while (n > 0);
+  }
+  const DIGITS = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9'];
+
+  function drawChargeMeter() {
+    if (state !== S_CHARGE || chargeT < 0.12) return;
+    const x0 = wizX - camWX - 7, y0 = FLOOR + 3;
+    const fill = Math.round(power * 13);
+    const full = power >= 1, blink = ((tick >> 2) & 1) === 1;
+    for (let x = 0; x < 15; x++) {
+      upx(x0 + x, y0, OUT); upx(x0 + x, y0 + 3, OUT);
+      for (let y = 1; y <= 2; y++) {
+        let c = OUT;
+        if (x > 0 && x < 14) c = x - 1 < fill ? (full ? (blink ? WHITE : CYAN) : y === 1 ? CYAN : BLUE) : ST_D;
+        upx(x0 + x, y0 + y, c);
+      }
+    }
+  }
+
+  // touch buttons live on the same 128x96 canvas
+  const BTN_X = new Int16Array([3, 26, 105]), BTN_Y = 81, BTN_W = 20, BTN_H = 13;
+  let showTouch = false;
+  try { showTouch = window.matchMedia('(pointer: coarse)').matches; } catch (_) { /* ignore */ }
+
+  function drawButton(b) {
+    const x = BTN_X[b], pressed = tCount[b] > 0 || (b === 2 && state === S_CHARGE && tCount[2] > 0);
+    const top = BTN_Y + (pressed ? 1 : 0);
+    const fillRows = b === 2 && state === S_CHARGE ? Math.round(power * (BTN_H - 2)) : 0;
+    for (let yy = 0; yy < BTN_H; yy++) {
+      for (let xx = 0; xx < BTN_W; xx++) {
+        const edgeX = xx === 0 || xx === BTN_W - 1, edgeY = yy === 0 || yy === BTN_H - 1;
+        if (edgeX && edgeY) continue;
+        let c;
+        if (edgeX || edgeY) c = OUT;
+        else if (fillRows > 0 && BTN_H - 1 - yy <= fillRows) c = yy === BTN_H - 1 - fillRows ? CYAN : BLUE;
+        else if (yy === 1 && !pressed) c = ST_L;
+        else if (yy === BTN_H - 2) c = ST_D;
+        else c = pressed ? ST_D : ST_M;
+        upx(x + xx, top + yy, c);
+      }
+    }
+    if (!pressed) for (let xx = 1; xx < BTN_W - 1; xx++) upx(x + xx, BTN_Y + BTN_H, OUT);
+    const cx = x + (BTN_W >> 1), cy = top + (BTN_H >> 1);
+    if (b < 2) {
+      for (let i = 0; i < 4; i++) {
+        const col = b === 0 ? cx - 2 + i : cx + 1 - i;
+        for (let j = -i; j <= i; j++) upx(col, cy + j, pressed ? BEARD_S : BEARD);
+      }
+    } else {
+      for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+        const m = (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+        if (m <= 2) upx(cx + dx, cy + dy, m === 0 ? WHITE : m === 1 ? CYAN : BLUE);
+      }
+    }
+  }
+
+  function drawUI() {
+    let x = drawText('HITS ', 3, 3, BEARD_S);
+    drawNum(score, x, 3, WHITE);
+    drawChargeMeter();
+    if (showTouch) { drawButton(0); drawButton(1); drawButton(2); return; }
+    if (hasWalked && hasCast) return;
+    // hint strip on the floor: "< > WALK HOLD SPACE CAST"
+    for (let yy = 85; yy <= 93; yy++) for (let xx = 13; xx <= 114; xx++) upx(xx, yy, OUT);
+    x = drawText('< >', 16, 87, WHITE);
+    x = drawText(' WALK HOLD ', x, 87, BEARD_S);
+    x = drawText('SPACE', x, 87, WHITE);
+    drawText(' CAST', x, 87, BEARD_S);
+  }
+
+  // ------------------------------------------------------------------ render
+  function render() {
+    drawSky();
+    drawStars();
+    drawMoon();
+    drawHills();
+    drawPillar(0, PILLAR_W - 1);
+    drawPillar(LEVEL_W - PILLAR_W, 0);
+    drawFloor();
+    drawGroundFx();
+    drawTargets();
+    drawHalo();
+    compositeWizard();
+    drawGem();
+    drawBurst();
+    drawProjectile();
+    drawParticles();
+    drawUI();
+    for (let i = 0; i < NPIX; i++) out32[i] = PAL32[fb[i]];
+    octx.putImageData(img, 0, 0);
+    vctx.drawImage(off, 0, 0, W, H, offX, offY, W * scale, H * scale);
+  }
+
+  // ------------------------------------------------------------------ display sizing
+  function applySize(pw, ph) {
+    if (pw < 1 || ph < 1) return;
+    if (view.width !== pw || view.height !== ph) { view.width = pw; view.height = ph; }
+    scale = Math.max(1, Math.floor(Math.min(pw / W, ph / H)));
+    offX = Math.floor((pw - W * scale) / 2);
+    offY = Math.floor((ph - H * scale) / 2);
+    cssToDev = view.clientWidth > 0 ? pw / view.clientWidth : (window.devicePixelRatio || 1);
+    vctx.imageSmoothingEnabled = false;
+    vctx.fillStyle = PAL_HEX[0];
+    vctx.fillRect(0, 0, pw, ph);
+  }
+  function measureFallback() {
+    const d = window.devicePixelRatio || 1;
+    applySize(Math.round(view.clientWidth * d), Math.round(view.clientHeight * d));
+  }
+  if (typeof ResizeObserver === 'function') {
+    const ro = new ResizeObserver(function (entries) {
+      const en = entries[0];
+      if (en.devicePixelContentBoxSize && en.devicePixelContentBoxSize[0]) {
+        applySize(en.devicePixelContentBoxSize[0].inlineSize, en.devicePixelContentBoxSize[0].blockSize);
+      } else {
+        const d = window.devicePixelRatio || 1;
+        applySize(Math.round(en.contentRect.width * d), Math.round(en.contentRect.height * d));
+      }
+    });
+    try { ro.observe(view, { box: 'device-pixel-content-box' }); } catch (_) { ro.observe(view); }
+  } else {
+    window.addEventListener('resize', measureFallback);
+  }
+  measureFallback();
+
+  // ------------------------------------------------------------------ input wiring
+  function setKey(code, down) {
+    if (code === 'ArrowLeft' || code === 'KeyA') { kL = down; if (down) lastDir = -1; return true; }
+    if (code === 'ArrowRight' || code === 'KeyD') { kR = down; if (down) lastDir = 1; return true; }
+    if (code === 'Space') { if (down && !kC) castLatch = true; kC = down; return true; }
+    return false;
+  }
+  window.addEventListener('keydown', function (e) { if (setKey(e.code, true)) e.preventDefault(); });
+  window.addEventListener('keyup', function (e) { if (setKey(e.code, false)) e.preventDefault(); });
+  window.addEventListener('blur', function () { kL = kR = kC = false; });
+
+  const ptrId = new Int32Array(10).fill(-1), ptrBtn = new Int8Array(10).fill(-1);
+  function buttonAt(clientX, clientY) {
+    const lx = (clientX * cssToDev - offX) / scale, ly = (clientY * cssToDev - offY) / scale;
+    for (let b = 0; b < 3; b++) {
+      if (lx >= BTN_X[b] - 3 && lx < BTN_X[b] + BTN_W + 3 && ly >= BTN_Y - 4 && ly < BTN_Y + BTN_H + 4) return b;
+    }
+    return -1;
+  }
+  function assign(id, b) {
+    let slot = -1;
+    for (let s = 0; s < 10; s++) if (ptrId[s] === id) { slot = s; break; }
+    if (slot < 0) {
+      if (b < 0) return;
+      for (let s = 0; s < 10; s++) if (ptrId[s] === -1) { slot = s; break; }
+      if (slot < 0) return;
+      ptrId[slot] = id; ptrBtn[slot] = -1;
+    }
+    const old = ptrBtn[slot];
+    if (old === b) return;
+    if (old >= 0) tCount[old]--;
+    if (b >= 0) {
+      tCount[b]++;
+      if (b === 2) castLatch = true;
+      if (b < 2) lastDir = b === 0 ? -1 : 1;
+    }
+    ptrBtn[slot] = b;
+    if (b < 0) ptrId[slot] = -1;
+  }
+  view.addEventListener('pointerdown', function (e) {
+    view.focus();
+    if (e.pointerType === 'touch') showTouch = true;
+    if (!showTouch) return;
+    e.preventDefault();
+    try { view.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+    assign(e.pointerId, buttonAt(e.clientX, e.clientY));
+  });
+  view.addEventListener('pointermove', function (e) {
+    for (let s = 0; s < 10; s++) if (ptrId[s] === e.pointerId) { assign(e.pointerId, buttonAt(e.clientX, e.clientY)); return; }
+  });
+  function release(e) { assign(e.pointerId, -1); }
+  view.addEventListener('pointerup', release);
+  view.addEventListener('pointercancel', release);
+  view.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  try { view.focus(); } catch (_) { /* ignore */ }
+
+
+  // ------------------------------------------------------------------ loop
+  from.set(K_IDLE); pose.set(K_IDLE); dPose.set(K_IDLE);
+  computeRig(); buildSprite(); sampleTargets();
+  camF = Math.max(0, Math.min(LEVEL_W - W, wizX - (W >> 1) + 12)); camWX = Math.round(camF);
+
+  let last = -1, acc = 0;
+  function frame(now) {
+    requestAnimationFrame(frame);
+    if (last < 0) last = now;
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.25) dt = 0.25;
+    acc += dt;
+    let steps = 0;
+    while (acc >= DT - 1e-4 && steps < 12) { update(); acc -= DT; steps++; }
+    if (steps === 12) acc = 0;
+    render();
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
